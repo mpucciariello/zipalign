@@ -4,7 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"flag"
-	"io/ioutil"
+	"io"
 	"log"
 	"os"
 )
@@ -13,8 +13,8 @@ func main() {
 	var bias int
 	var verbose = flag.Bool("v", false, "Verbose output")
 	var alignment = flag.Int("a", 4, "Alignment in bytes, e.g. '4' provides 32-bit alignment")
-	var inputFile = flag.String("i", "", "Input ZIP file to be aligned")
-	var outputFile = flag.String("o", "", "Output aligned ZIP file")
+	var inputFile = flag.String("i", "bdt.v68.dat", "Input ZIP file to be aligned")
+	var outputFile = flag.String("o", "bdt.v68.aligned.dat", "Output aligned ZIP file")
 	var overwrite = flag.Bool("f", false, "Overwrite existing outfile.zip")
 	var help = flag.Bool("h", false, "Print this help")
 	flag.Parse()
@@ -42,7 +42,24 @@ func main() {
 	// Create a new zip archive.
 	w := zip.NewWriter(buf)
 
-	// Iterate through the files in the archive,
+	// Set a threshold for buffer size to trigger flush.
+	const flushThreshold = 1024 * 1024
+
+	// Track the size of written data.
+	var totalWritten int
+
+	// Function to flush buffer to disk.
+	flushBuffer := func() {
+		// Write the buffer content to the output file.
+		if err := os.WriteFile(*outputFile, buf.Bytes(), 0644); err != nil {
+			log.Fatal(err)
+		}
+		// Reset the buffer and update total written size.
+		buf.Reset()
+		totalWritten = 0
+	}
+
+	// Iterate through the files in the archive.
 	for _, f := range r.File {
 		if *verbose {
 			log.Printf("Processing %q from input archive", f.Name)
@@ -60,7 +77,9 @@ func main() {
 		} else {
 			// source: https://android.googlesource.com/platform/build.git/+/android-4.2.2_r1/tools/zipalign/ZipAlign.cpp#76
 			newOffset := len(f.Extra) + bias
+			log.Printf(" --- %s: len %d (uncompressed)", f.Name, len(f.Extra))
 			padlen = (*alignment - (newOffset % *alignment)) % *alignment
+			log.Printf(" --- %s: padding %d bytes %d offset", f.Name, padlen, newOffset)
 			if *verbose && padlen > 0 {
 				log.Printf(" --- %s: padding %d bytes", f.Name, padlen)
 			}
@@ -68,7 +87,7 @@ func main() {
 
 		fwhead := &zip.FileHeader{
 			Name:   f.Name,
-			Method: zip.Deflate,
+			Method: 0,
 		}
 		// add padlen number of null bytes to the extra field of the file header
 		// in order to align files on 4 bytes
@@ -80,26 +99,47 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		data, err := ioutil.ReadAll(rc)
-		if err != nil {
-			log.Fatal(err)
+
+		buf := make([]byte, 1024*1024)
+
+		for {
+
+			n, err := rc.Read(buf)
+			log.Printf("reading %d bytes", n)
+
+			if err != nil && err != io.EOF {
+				log.Fatal(err)
+			}
+
+			if n == 0 || err == io.EOF {
+				break
+			}
+
+			if _, err := fw.Write(buf[:n]); err != nil {
+				log.Fatal(err)
+			}
+			log.Printf("writing %d bytes", n)
+
+			// Update total written size
+			totalWritten += n
+
+			// Check if we need to flush buffer to disk
+			if totalWritten >= flushThreshold {
+				flushBuffer()
+			}
+
 		}
-		_, err = fw.Write(data)
-		if err != nil {
-			log.Fatal(err)
-		}
+
 		rc.Close()
 		bias += padlen
 	}
 
-	// Make sure to check the error on Close.
-	err = w.Close()
-	if err != nil {
-		log.Fatal(err)
+	// Flush the remaining buffer to disk
+	if buf.Len() > 0 {
+		flushBuffer()
 	}
 
-	// Write the aligned zip file
-	err = ioutil.WriteFile(*outputFile, buf.Bytes(), 0744)
+	err = w.Close()
 	if err != nil {
 		log.Fatal(err)
 	}
