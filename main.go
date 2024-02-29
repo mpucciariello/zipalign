@@ -2,8 +2,8 @@ package main
 
 import (
 	"archive/zip"
-	"bytes"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -15,7 +15,7 @@ func main() {
 	var alignment = flag.Int("a", 4, "Alignment in bytes, e.g. '4' provides 32-bit alignment")
 	var inputFile = flag.String("i", "bdt.v68.dat", "Input ZIP file to be aligned")
 	var outputFile = flag.String("o", "bdt.v68.aligned.dat", "Output aligned ZIP file")
-	var overwrite = flag.Bool("f", false, "Overwrite existing outfile.zip")
+	var overwrite = flag.Bool("f", true, "Overwrite existing outfile.zip")
 	var help = flag.Bool("h", false, "Print this help")
 	flag.Parse()
 
@@ -29,6 +29,7 @@ func main() {
 	if *verbose {
 		log.Printf("Aligning %q on %d bytes and writing out to %q", *inputFile, *alignment, *outputFile)
 	}
+
 	// Open a zip archive for reading.
 	r, err := zip.OpenReader(*inputFile)
 	if err != nil {
@@ -36,28 +37,14 @@ func main() {
 	}
 	defer r.Close()
 
-	// Create a buffer to write our archive to.
-	buf := new(bytes.Buffer)
+	zipf, _ := os.Create(*outputFile)
+	defer zipf.Close()
 
 	// Create a new zip archive.
-	w := zip.NewWriter(buf)
-
-	// Set a threshold for buffer size to trigger flush.
-	const flushThreshold = 1024 * 1024
+	w := zip.NewWriter(zipf)
 
 	// Track the size of written data.
 	var totalWritten int
-
-	// Function to flush buffer to disk.
-	flushBuffer := func() {
-		// Write the buffer content to the output file.
-		if err := os.WriteFile(*outputFile, buf.Bytes(), 0644); err != nil {
-			log.Fatal(err)
-		}
-		// Reset the buffer and update total written size.
-		buf.Reset()
-		totalWritten = 0
-	}
 
 	// Iterate through the files in the archive.
 	for _, f := range r.File {
@@ -68,6 +55,7 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
+
 		var padlen int
 		if f.CompressedSize64 != f.UncompressedSize64 {
 			// File is compressed, copy the entry without padding
@@ -75,7 +63,6 @@ func main() {
 				log.Printf("--- %s: len %d (compressed)", f.Name, f.UncompressedSize64)
 			}
 		} else {
-			// source: https://android.googlesource.com/platform/build.git/+/android-4.2.2_r1/tools/zipalign/ZipAlign.cpp#76
 			newOffset := len(f.Extra) + bias
 			log.Printf(" --- %s: len %d (uncompressed)", f.Name, len(f.Extra))
 			padlen = (*alignment - (newOffset % *alignment)) % *alignment
@@ -86,8 +73,9 @@ func main() {
 		}
 
 		fwhead := &zip.FileHeader{
-			Name:   f.Name,
-			Method: 0,
+			Name:               f.Name,
+			Method:             f.Method,
+			UncompressedSize64: f.UncompressedSize64,
 		}
 		// add padlen number of null bytes to the extra field of the file header
 		// in order to align files on 4 bytes
@@ -103,9 +91,8 @@ func main() {
 		buf := make([]byte, 1024*1024)
 
 		for {
-
+			// 1MB buffer
 			n, err := rc.Read(buf)
-			log.Printf("reading %d bytes", n)
 
 			if err != nil && err != io.EOF {
 				log.Fatal(err)
@@ -118,29 +105,66 @@ func main() {
 			if _, err := fw.Write(buf[:n]); err != nil {
 				log.Fatal(err)
 			}
-			log.Printf("writing %d bytes", n)
 
 			// Update total written size
 			totalWritten += n
 
-			// Check if we need to flush buffer to disk
-			if totalWritten >= flushThreshold {
-				flushBuffer()
-			}
-
 		}
 
-		rc.Close()
 		bias += padlen
+		rc.Close()
 	}
 
-	// Flush the remaining buffer to disk
-	if buf.Len() > 0 {
-		flushBuffer()
-	}
-
+	// Close the zip writer after writing all the content
 	err = w.Close()
 	if err != nil {
 		log.Fatal(err)
+	}
+
+	zipFilePath := "bdt.v68.dat"
+
+	zipFile, err := zip.OpenReader(zipFilePath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer zipFile.Close()
+
+	for _, file := range zipFile.File {
+		fileReader, err := file.Open()
+		if err != nil {
+			log.Println("Error al abrir el archivo", file.Name, ":", err)
+			continue
+		}
+		defer fileReader.Close()
+		fmt.Println(file.Name, file.FileInfo().Size(), file.CRC32)
+	}
+
+	lenZip()
+
+}
+
+func lenZip() {
+	zipFilePath := "bdt.v68.aligned.dat"
+
+	zipFile, err := zip.OpenReader(zipFilePath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer zipFile.Close()
+
+	for _, file := range zipFile.File {
+		fileReader, err := file.Open()
+		if err != nil {
+			log.Println("Error al abrir el archivo", file.Name, ":", err)
+			continue
+		}
+		defer fileReader.Close()
+		fmt.Println(file.Name, file.FileInfo().Size(), file.CRC32)
+		if len(file.Extra)%4 == 0 {
+
+			fmt.Println("El archivo", file.Name, "está alineado.")
+		} else {
+			fmt.Println("El archivo", file.Name, "NO está alineado.")
+		}
 	}
 }
